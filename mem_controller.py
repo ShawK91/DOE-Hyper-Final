@@ -1,13 +1,12 @@
 import mod_hyper as mod, math
 from scipy.special import expit
-from matplotlib import pyplot as plt
 import numpy as np, os
 from random import randint
 from torch.autograd import Variable
 import torch
 import random
 from torch.utils import data as util
-plt.switch_backend('Qt4Agg')
+import matplotlib.pyplot as plt
 
 
 class Tracker(): #Tracker
@@ -49,7 +48,6 @@ class Parameters:
             self.load_seed = False #Loads a seed population from the save_foldername
                                   # IF FALSE: Runs Backpropagation, saves it and uses that
             # Determine the nerual archiecture
-            self.arch_type = 2
             self. output_activation = None
 
             #Controller choices
@@ -57,36 +55,33 @@ class Parameters:
             self.run_time = 300 #Controller Run time
 
             #Controller noise
-            self.sensor_noise = 0.1
+            self.sensor_noise = 0.0
             self.sensor_failure = 0.0
             self.actuator_noise = 0.0
 
             # Reconfigurability parameters
-            self.is_random_initial_state = True  # Start state of controller
+            self.is_random_initial_state = False  # Start state of controller
             self.num_profiles = 3
             self.reconf_shape = 2 #1 Periodic shape, #2 Mimicking real shape
 
             #GD Stuff
-            self.total_epochs = 12
-            self.batch_size = 100
+            self.total_epochs = 50
+            self.batch_size = 10
 
             #SSNE stuff
             self.num_input = 20
-            self.num_hnodes = 20
+            self.num_hnodes = 30
             self.num_mem = self.num_hnodes
             self.num_output = 2
-            self.elite_fraction = 0.1
+            self.elite_fraction = 0.07
             self.crossover_prob = 0.1
-            self.mutation_prob = 0.75
-            self.weight_magnitude_limit = 10000000
+            self.mutation_prob = 0.9
+            self.weight_magnitude_limit = 1000000
             self.extinction_prob = 0.004  # Probability of extinction event
             self.extinction_magnituide = 0.5  # Probabilty of extinction for each genome, given an extinction event
-            self.mut_distribution = 3  # 1-Gaussian, 2-Laplace, 3-Uniform, ELSE-all 1s
-            self.total_gens = 100000
-            self.num_evals = 7 #Number of independent evaluations before getting a fitness score
-
-            if self.arch_type == 1: self.arch_type = 'FF'
-            elif self.arch_type == 2: self.arch_type = 'GRU-MB'
+            self.mut_distribution = 0  # 1-Gaussian, 2-Laplace, 3-Uniform, ELSE-all 1s
+            self.total_gens = 10000
+            self.num_evals = 20 #Number of independent evaluations before getting a fitness score
             self.save_foldername = 'R_Reconfigurable_Controller/'
 
 class Fast_Simulator(): #TF Simulator individual (One complete simulator genome)
@@ -98,19 +93,17 @@ class Fast_Simulator(): #TF Simulator individual (One complete simulator genome)
         h_1 = expit(np.dot(input, self.W[0]) + self.W[1])
         return np.dot(h_1, self.W[2]) + self.W[3]
 
-    def from_tf(self, tf_sess):
-        self.W = tf_sess.run(tf.trainable_variables())
+
 
 class Task_Controller: #Reconfigurable Control Task
     def __init__(self, parameters):
         self.parameters = parameters
         self.num_input = parameters.num_input; self.num_hidden = parameters.num_hnodes; self.num_output = parameters.num_output
 
-        self.train_data, self.valid_data = self.data_preprocess() #Get simulator data
+        self.train_data = self.data_preprocess() #Get simulator data
         self.ssne = mod.SSNE(parameters) #Initialize SSNE engine
 
         # Save folder for checkpoints
-        self.marker = 'TF_ANN'
         self.save_foldername = self.parameters.save_foldername
         if not os.path.exists(self.save_foldername):
             os.makedirs(self.save_foldername)
@@ -119,23 +112,19 @@ class Task_Controller: #Reconfigurable Control Task
         self.simulator = mod.unpickle('Champion_Simulator')
         #mod.simulator_results(self.simulator)
 
-
         #####Create Reconfigurable controller population
         self.pop = []
         for i in range(self.parameters.pop_size):
             # Choose architecture
-            self.pop.append(mod.PT_GRUMB(self.num_input, self.num_hidden, parameters.num_mem, self.num_output,
+            self.pop.append(mod.MMU(self.num_input, self.num_hidden, parameters.num_mem, self.num_output,
                                              output_activation=self.parameters.output_activation))
 
-
-
-
         ###Initialize Controller Population
-        if self.parameters.load_seed: #Load seed population
-            self.pop[0] = mod.unpickle('R_Controller/seed_controller') #Load PT_GRUMB object
+        if self.parameters.load_seed: self.pop[0] = mod.unpickle('R_Controller/seed_controller') #Load PT_GRUMB object
         else: #Run Backprop
-            self.run_bprop(self.pop[0])
-        self.pop[0].to_fast_net()  # transcribe neurosphere to its Fast_Net
+            self.run_bprop(self.pop[0].gd_net)
+            self.pop[0].from_gdnet()
+
 
     def save(self, individual, filename ):
         mod.pickle_object(individual, filename)
@@ -143,79 +132,120 @@ class Task_Controller: #Reconfigurable Control Task
     def predict(self, individual, input): #Runs the individual net and computes and output by feedforwarding
         return individual.predict(input)
 
-
     def run_bprop(self, model):
+        #Get train_x
+        sensor_target = self.train_data[1:, self.parameters.target_sensor:self.parameters.target_sensor + 1]  #Sensor target that needs to me met
         all_train_x = self.train_data[0:-1,0:-2]
-        sensor_target = self.train_data[1:,self.parameters.target_sensor:self.parameters.target_sensor+1]
         all_train_x = np.concatenate((all_train_x, sensor_target), axis=1) #Input training data
-        all_train_y = self.train_data[0:-1,-2:] #Target Controller Output
-        # criterion = torch.nn.L1Loss(False)
-        #criterion = torch.nn.SmoothL1Loss(False)
-        # criterion = torch.nn.KLDivLoss()
-        criterion = torch.nn.MSELoss()
-        # criterion = torch.nn.BCELoss()
-        optimizer = torch.optim.Adam(model.parameters(), lr=0.005, weight_decay=0.1)
-        # optimizer = torch.optim.Adagrad(model.parameters(), lr=0.01)
-        # optimizer = torch.optim.SGD(model.parameters(), lr=0.005, momentum = 0.5, nesterov = True)
-        # optimizer = torch.optim.RMSprop(model.parameters(), lr = 0.005, momentum=0.1)
 
+        #Get Train_y
+        all_train_y = self.train_data[0:-1,-2:] #Target Controller Output
+
+        if True: #GD optimizer choices
+            # criterion = torch.nn.L1Loss(False)
+            criterion = torch.nn.SmoothL1Loss(False)
+            # criterion = torch.nn.KLDivLoss()
+            #criterion = torch.nn.MSELoss()
+            # criterion = torch.nn.BCELoss()
+            optimizer = torch.optim.Adam(model.parameters(), lr=0.005)
+            # optimizer = torch.optim.Adagrad(model.parameters(), lr=0.01)
+            # optimizer = torch.optim.SGD(model.parameters(), lr=0.005, momentum = 0.5, nesterov = True)
+            # optimizer = torch.optim.RMSprop(model.parameters(), lr = 0.005, momentum=0.1)
+
+        #Set up training
         seq_len = 1
-        #eval_train_y = all_train_y[:]  # Copy just the list to evaluate batch
         all_train_x = torch.Tensor(all_train_x).cuda(); all_train_y = torch.Tensor(all_train_y).cuda()
-        #eval_train_x = all_train_x[:]  # Copy tensor to evaluate batch
         train_dataset = util.TensorDataset(all_train_x, all_train_y)
         train_loader = util.DataLoader(train_dataset, batch_size=self.parameters.batch_size, shuffle=True)
         model.cuda()
+
         for epoch in range(1, self.parameters.total_epochs + 1):
 
             epoch_loss = 0.0
             for data in train_loader:  # Each Batch
                 net_inputs, targets = data
+                net_inputs = torch.t(net_inputs); targets = torch.t(targets)
 
-                model.reset(len(net_inputs))  # Reset memory and recurrent out for the model
+                model.reset(len(net_inputs[1]))  # Reset memory and recurrent out for the model
                 for i in range(seq_len):  # For the length of the sequence
                     #net_inp = Variable(net_inputs[:, i], requires_grad=True).unsqueeze(0)
                     net_inp = Variable(net_inputs, requires_grad=True)
-                    net_inp = torch.t(net_inp)
                     net_out = model.forward(net_inp)
                     target_T = Variable(targets)
                     loss = criterion(net_out, target_T)
                     loss.backward(retain_variables=True)
                     epoch_loss += loss.cpu().data.numpy()[0]
 
-            optimizer.step()  # Perform the gradient updates to weights for the entire set of collected gradients
-            optimizer.zero_grad()
 
-            if epoch % 1 == 0:
-                #test_x = torch.Tensor(test_x).cuda()
-                #train_fitness = self.batch_evaluate(self.model, eval_train_x, eval_train_y)
-                #valid_fitness = self.batch_evaluate(self.model, test_x, test_y)
-                print 'Epoch: ', epoch, ' Loss: ', epoch_loss
-                #print ' Train_Performance:', "%0.2f" % train_fitness,
-                #print ' Valid_Performance:', "%0.2f" % valid_fitness
-                #tracker.update([epoch_loss, train_fitness, valid_fitness], epoch)
-                #torch.save(self.model, self.save_foldername + 'seq_classifier_net')
+                optimizer.step()  # Perform the gradient updates to weights for the entire set of collected gradients
+                optimizer.zero_grad()
+
+            print 'Epoch: ', epoch, ' Loss: ', epoch_loss
+
+    def plot_controller(self, individual):
+        setpoints = self.get_setpoint()
+        sim_input = mod.unsqueeze(np.copy(self.train_data[0][0:]), axis=0)
+        control_input = mod.unsqueeze(np.delete(np.copy(sim_input), 1))  # Input to the controller
+
+        track_output = np.zeros((len(setpoints) - 1, 1))
+        individual.reset(batch_size = 1)
+
+        for example in range(len(setpoints) - 1):  # For duration of training
+            # Fill in the setpoint to control input
+            control_input[-1][0] = setpoints[example]
+
+            # Add noise to the state input to the controller
+            if self.parameters.sensor_noise != 0:  # Add sensor noise
+                for i in range(19):
+                    std = self.parameters.sensor_noise * abs(control_input[0][i])
+                    if std != 0:
+                        control_input[i][0] += np.random.normal(0, std)
+
+            if self.parameters.sensor_failure != None:  # Failed sensor outputs 0 regardless
+                if random.random() < self.parameters.sensor_failure:
+                    control_input[11][0] = 0.0
+
+            # RUN THE CONTROLLER TO GET CONTROL OUTPUT
+            control_out = individual.predict(control_input)
+            #
+            # Add actuator noise (controls)
+            if self.parameters.actuator_noise != 0:
+                for i in range(len(control_out[0])):
+                    std = self.parameters.actuator_noise * abs(control_out[0][i])
+                    if std != 0:
+                        control_out[i][0] += np.random.normal(0, std)
 
 
+            # Fill in the controls
+            sim_input[0][19] = control_out[0][0]
+            sim_input[0][20] = control_out[1][0]
+
+            # Use the simulator to get the next state
+            simulator_out = self.simulator.predict(sim_input)
+
+            # Calculate error (weakness)
+            track_output[example][0] = simulator_out[0][11]
+
+            # Fill in the simulator inputs and control inputs
+            for i in range(simulator_out.shape[-1]):
+                sim_input[0][i] = simulator_out[0][i]
+                control_input[i][0] = simulator_out[0][i]
 
 
+        plt.plot(setpoints, 'r--', label='Desired Turbine Speed')
+        plt.plot(track_output, 'b-', label='Achieved Turbine Speed')
+        # np.savetxt('R_Simulator/output_' + str(index) + '.csv', track_output[index])
+        # np.savetxt('R_Simulator/target_' + str(index) + '.csv', track_target[index])
+        plt.legend(loc='upper right', prop={'size': 15})
+        plt.xlabel("Time", fontsize=15)
+        plt.ylabel("ST-502 (Turbine Speed)", fontsize=15)
+        axes = plt.gca()
+        axes.set_ylim([0, 1.1])
+        # plt.savefig('Graphs/' + 'Index' + str(index) + '.png')
+        # print track_output[index]
+        plt.show()
 
-    def plot_controller(self, individual, data_setpoints=False):
-        setpoints = self.get_setpoints()
-        if self.parameters.is_random_initial_state:
-            start_sim_input = np.copy(self.train_data[randint(0, len(self.train_data))])
-        else:
-            start_sim_input = np.reshape(np.copy(self.train_data[0]), (1, len(self.train_data[0])))
-        start_controller_input = np.reshape(np.zeros(self.ssne_param.num_input), (1, self.ssne_param.num_input))
-        for i in range(start_sim_input.shape[-1] - 2): start_controller_input[0][i] = start_sim_input[0][i]
-
-        if data_setpoints: #Bprop test
-            setpoints = self.train_data[0:, 11:12]
-            mod.controller_results_bprop(individual, setpoints, start_controller_input, start_sim_input, self.simulator, self.train_data[0:,0:-2])
-        else:
-            mod.controller_results(individual, setpoints, start_controller_input, start_sim_input, self.simulator)
-
-    def get_setpoints(self):
+    def get_setpoint(self):
         if self.parameters.reconf_shape == 1:
             desired_setpoints = np.reshape(np.zeros(self.parameters.run_time), (parameters.run_time, 1))
             for profile in range(parameters.num_profiles):
@@ -228,8 +258,8 @@ class Task_Controller: #Reconfigurable Control Task
                     desired_setpoints[profile * self.parameters.run_time/self.parameters.num_profiles + i][0] = turbine_speed
 
         elif self.parameters.reconf_shape == 2:
-            desired_setpoints = np.reshape(np.zeros(self.parameters.run_time), (parameters.run_time, 1)) + random.uniform(0.4, 0.6)
-            noise = np.random.uniform(-0.01, 0.01, (parameters.run_time, 1))
+            desired_setpoints = np.zeros(self.parameters.run_time) + random.uniform(0.4, 0.6)
+            noise = np.random.uniform(-0.01, 0.01, (parameters.run_time))
             desired_setpoints += noise
 
             for profile_id in range(self.parameters.num_profiles):
@@ -241,103 +271,90 @@ class Task_Controller: #Reconfigurable Control Task
                 magnitude = random.uniform(-0.25, 0.25)
 
                 for i in range(start, end):
-                    desired_setpoints[i][0] += magnitude
+                    desired_setpoints[i] += magnitude
 
 
-        plt.plot(desired_setpoints, 'r--', label='Setpoints')
-        plt.show()
-        sys.exit()
+        # plt.plot(desired_setpoints, 'r--', label='Setpoints')
+        # plt.show()
         return desired_setpoints
 
-    def compute_fitness(self, individual, setpoints, start_controller_input, start_sim_input): #Controller fitness
-        weakness = 0.0
-        individual.fast_net.reset()
+    def batch_copy(self, mat, batch_size, axis):
+        padded_mat = np.copy(mat)
+        for _ in range(batch_size-1): padded_mat = np.concatenate((padded_mat, mat), axis=axis)
+        return padded_mat
 
-        control_input = np.copy(start_controller_input) #Input to the controller
-        sim_input = np.copy(start_sim_input) #Input to the simulator
 
-        for example in range(len(setpoints) - 1):  # For all training examples
-            # Fill in the setpoint to control input
-            control_input[0][-1] = setpoints[example][0]
+    def compute_fitness(self, individual, setpoints, start_sim_input, control_input): #Controller fitness
+        weakness = 0.0;
+        individual.reset(batch_size = self.parameters.num_evals)
+
+        sim_input = self.batch_copy(start_sim_input, self.parameters.num_evals, axis=0) #Input to the simulator
+        control_input = self.batch_copy(control_input, self.parameters.num_evals, axis=1)
+
+        for example in range(self.parameters.run_time):  # For duration of run
 
             # Add noise to the state input to the controller
             if self.parameters.sensor_noise != 0:  # Add sensor noise
-                for i in range(19):
-                    std = self.parameters.sensor_noise * abs(control_input[0][i])
-                    if std != 0:
-                        control_input[0][i] += np.random.normal(0, std )
+                noise_mul = np.random.normal(0, self.parameters.sensor_noise, (control_input.shape[0], control_input.shape[1]))
+                control_input = np.multiply(control_input, noise_mul)
 
-            if self.parameters.sensor_failure != None:  # Failed sensor outputs 0 regardless
-                    if random.random() < self.parameters.sensor_failure:
-                        control_input[0][11] = 0.0
-            #
+
+            # if random.random() < self.parameters.sensor_failure:
+            #     control_input[0][11] = 0.0
+
+            # Fill in the setpoint to control input
+            control_input[-1, :] = setpoints[:, example]
+
 
             #RUN THE CONTROLLER TO GET CONTROL OUTPUT
-            control_out = individual.fast_net.predict(control_input)
-            #
+            control_out = individual.predict(control_input)
+
             # Add actuator noise (controls)
-            if self.parameters.actuator_noise != 0:
-                for i in range(len(control_out[0])):
-                    std = self.parameters.actuator_noise * abs(control_out[0][i])
-                    if std != 0:
-                        control_out[0][i] += np.random.normal(0, std)
+            if self.parameters.actuator_noise != 0:  # Add actuator noise
+                noise_mul = np.random.normal(0, self.parameters.actuator_noise, (control_out.shape[0], control_out.shape[1]))
+                control_out = np.multiply(control_out, noise_mul)
 
             #Fill in the controls
-            sim_input[0][19] = control_out[0][0]
-            sim_input[0][20] = control_out[0][1]
+            sim_input[:,19] = control_out[0][:]
+            sim_input[:,20] = control_out[1][:]
 
             # Use the simulator to get the next state
             simulator_out = self.simulator.predict(sim_input)
 
             # Calculate error (weakness)
-            weakness += math.fabs(simulator_out[0][self.parameters.target_sensor] - setpoints[example][0])  # Time variant simulation
+            weakness += np.mean(np.fabs(simulator_out[:,self.parameters.target_sensor] - setpoints[:,example]))  # Time variant simulation
 
             # Fill in the simulator inputs and control inputs
-            for i in range(simulator_out.shape[-1]):
-                sim_input[0][i] = simulator_out[0][i]
-                control_input[0][i] = simulator_out[0][i]
+            sim_input[:, 0:19] = simulator_out[:, 0:19]
+            control_input[0:-1,:] = np.transpose(simulator_out[:,0:19])
 
         return -weakness
 
     def evolve(self, gen):
+        setpoints = []
+        for _ in range(self.parameters.num_evals): setpoints.append(self.get_setpoint())
+        setpoints = np.array(setpoints)
 
-        #Fitness evaluation list for the generation
-        fitness_evals = [0.0] * (self.parameters.population_size)
+        sim_input = mod.unsqueeze(np.copy(self.train_data[0][0:]), axis=0)
+        control_input = mod.unsqueeze(np.delete(np.copy(sim_input), 1))  # Input to the controller
 
-        for eval in range(parameters.num_evals): #Take multiple samples
-            #Figure initial position and setpoints for the generation
-            setpoints = self.get_setpoints()
-            if self.parameters.is_random_initial_state:
-                start_sim_input = np.reshape(np.copy(np.copy(self.train_data[randint(0,len(self.train_data)-2)])), (1, len(self.train_data[0])))
-            else: start_sim_input = np.reshape(np.copy(self.train_data[0]), (1, len(self.train_data[0])))
-            start_controller_input = np.reshape(np.zeros(self.ssne_param.num_input), (1, self.ssne_param.num_input))
-            for i in range(start_sim_input.shape[-1]-2):
-                start_controller_input[0][i] = start_sim_input[0][i]
-
-
-            #Test all individuals and assign fitness
-            for index, individual in enumerate(self.pop): #Test all genomes/individuals
-                fitness = self.compute_fitness(individual, setpoints, start_controller_input, start_sim_input)
-                fitness_evals[index] += fitness/(1.0*parameters.num_evals)
+        #Test all individuals and assign fitness
+        fitness_evals = []
+        for index, individual in enumerate(self.pop): #Test all genomes/individuals
+            fitness_evals.append(self.compute_fitness(individual, setpoints, sim_input, control_input))
         gen_best_fitness = max(fitness_evals)
 
-        #Champion Individual
+        #Validation Score
         champion_index = fitness_evals.index(max(fitness_evals))
-        valid_score = 0.0
-        for eval in range(parameters.num_evals):  # Take multiple samples
-            setpoints = self.get_setpoints()
-            if self.parameters.is_random_initial_state: start_sim_input = start_sim_input = np.reshape(np.copy(np.copy(self.valid_data[randint(0,len(self.valid_data)-2)])), (1, len(self.valid_data[0])))
-            else: start_sim_input = np.reshape(np.copy(self.valid_data[0]), (1, len(self.valid_data[0])))
-            start_controller_input = np.reshape(np.zeros(self.ssne_param.num_input), (1, self.ssne_param.num_input))
-            for i in range(start_sim_input.shape[-1]-2): start_controller_input[0][i] = start_sim_input[0][i]
-            valid_score += self.compute_fitness(self.pop[champion_index], setpoints, start_controller_input, start_sim_input)/(1.0*parameters.num_evals)
+        valid_setpoints = []
+        for _ in range(self.parameters.num_evals): valid_setpoints.append(self.get_setpoint())
+        valid_setpoints = np.array(valid_setpoints)
+        valid_score = self.compute_fitness(self.pop[champion_index], valid_setpoints, sim_input, control_input)
 
 
         #Save population and Champion
-        if gen % 50 == 0:
-            #for index, individual in enumerate(self.pop): #Save population
-                #self.save(individual, self.save_foldername + 'Controller_' + str(index))
-            self.save(self.pop[champion_index], self.save_foldername + 'Champion_Controller') #Save champion
+        if gen % 20 == 0:
+            self.save(self.pop[champion_index], self.save_foldername + 'champ_controller') #Save champion
             np.savetxt(self.save_foldername + '/gen_tag', np.array([gen + 1]), fmt='%.3f', delimiter=',')
 
         #SSNE Epoch: Selection and Mutation/Crossover step
@@ -371,23 +388,20 @@ class Task_Controller: #Reconfigurable Control Task
             normalizer[i] = max[i] - min[i] + 0.00001
             data[:, i] = (data[:, i] - min[i]) / normalizer[i]
 
+
+        return data
         #Train/Valid split
         train_data = data[0:split]
         valid_data = data[split:len(data)]
 
         return train_data, valid_data
 
-    def test_restore(self, individual):
-        train_x = self.train_data[0:-1]
-        train_y = self.train_data[1:,0:-2]
-        print individual.sess.run(self.cost, feed_dict={self.input: train_x, self.target: train_y})
-        self.load(individual, 'Controller_' + str(98))
-        print individual.sess.run(self.cost, feed_dict={self.input: train_x, self.target: train_y})
+
+
 
 if __name__ == "__main__":
     parameters = Parameters()  # Create the Parameters class
     tracker = Tracker(parameters)  # Initiate tracker
-    print 'Running Reconfigurable Controller Training ', parameters.arch_type
 
     control_task = Task_Controller(parameters)
     for gen in range(1, parameters.total_gens):

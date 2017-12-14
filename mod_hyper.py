@@ -1,28 +1,134 @@
-from random import randint
-import math
-from scipy.special import expit
-import os, cPickle
-#import tensorflow as tf
 import torch.nn as nn
 from torch.autograd import Variable
 from torch.nn import Parameter
-import random
-import numpy as np, torch
-from copy import deepcopy
+import torch
 import torch.nn.functional as F
-from matplotlib import pyplot as plt
-plt.switch_backend('Qt4Agg')
-#plt.switch_backend('TKAgg')
+import numpy as np, sys
+import matplotlib.pyplot as plt
+from scipy.special import expit
+import random, fastrand, math, cPickle
 
 
 
 
+class MMU:
+    def __init__(self, num_input, num_hnodes, num_memory, num_output, output_activation, mean = 0, std = 1):
+        self.num_input = num_input; self.num_output = num_output; self.num_hnodes = num_hnodes; self.num_mem = num_memory
+        self.output_activation = output_activation
 
-###########TEST###########
+        #Input gate
+        self.w_inpgate = np.mat(np.random.normal(mean, std, (num_memory, num_input)))
+        self.w_rec_inpgate = np.mat(np.random.normal(mean, std, (num_memory, num_output)))
+        self.w_mem_inpgate = np.mat(np.random.normal(mean, std, (num_memory, num_memory)))
 
-class PT_GRUMB(nn.Module):
+        #Block Input
+        self.w_inp = np.mat(np.random.normal(mean, std, (num_memory, num_input)))
+        self.w_rec_inp = np.mat(np.random.normal(mean, std, (num_memory, num_output)))
+
+        #Read gate
+        self.w_readgate = np.mat(np.random.normal(mean, std, (num_memory, num_input)))
+        self.w_rec_readgate = np.mat(np.random.normal(mean, std, (num_memory, num_output)))
+        self.w_mem_readgate = np.mat(np.random.normal(mean, std, (num_memory, num_memory)))
+
+        #Memory write gate
+        self.w_writegate = np.mat(np.random.normal(mean, std, (num_memory, num_input)))
+        self.w_rec_writegate = np.mat(np.random.normal(mean, std, (num_memory, num_output)))
+        self.w_mem_writegate = np.mat(np.random.normal(mean, std, (num_memory, num_memory)))
+
+        #Output weights
+        self.w_hid_out= np.mat(np.random.normal(mean, std, (num_output, num_memory)))
+
+        #Biases
+        self.w_input_gate_bias = np.mat(np.zeros((num_memory, 1)))
+        self.w_block_input_bias = np.mat(np.zeros((num_memory, 1)))
+        self.w_readgate_bias = np.mat(np.zeros((num_memory, 1)))
+        self.w_writegate_bias = np.mat(np.zeros((num_memory, 1)))
+
+        #Adaptive components (plastic with network running)
+        self.output = np.mat(np.zeros((num_output, 1)))
+        self.memory = np.mat(np.zeros((num_memory, 1)))
+
+        self.param_dict = {'w_inpgate': self.w_inpgate,
+                           'w_rec_inpgate': self.w_rec_inpgate,
+                           'w_mem_inpgate': self.w_mem_inpgate,
+                           'w_inp': self.w_inp,
+                           'w_rec_inp': self.w_rec_inp,
+                            'w_readgate': self.w_readgate,
+                            'w_rec_readgate': self.w_rec_readgate,
+                            'w_mem_readgate': self.w_mem_readgate,
+                            'w_writegate': self.w_writegate,
+                            'w_rec_writegate': self.w_rec_writegate,
+                            'w_mem_writegate': self.w_mem_writegate,
+                           'w_hid_out': self.w_hid_out,
+                            'w_input_gate_bias': self.w_input_gate_bias,
+                           'w_block_input_bias': self.w_block_input_bias,
+                            'w_readgate_bias': self.w_readgate_bias,
+                           'w_writegate_bias': self.w_writegate_bias}
+
+        self.gd_net = PT_MMU(num_input, num_hnodes, num_memory, num_output, output_activation) #Gradient Descent Net
+
+    def forward(self, input): #Feedforwards the input and computes the forward pass of the network
+        input = np.mat(input)
+        #Input gate
+        input_gate_out = expit(np.dot(self.w_inpgate, input)+ np.dot(self.w_rec_inpgate, self.output) + np.dot(self.w_mem_inpgate, self.memory) + self.w_input_gate_bias)
+
+        #Input processing
+        block_input_out = expit(np.dot(self.w_inp, input) + np.dot(self.w_rec_inp, self.output) + self.w_block_input_bias)
+
+        #Gate the Block Input and compute the final input out
+        input_out = np.multiply(input_gate_out, block_input_out)
+
+        #Read Gate
+        read_gate_out = expit(np.dot(self.w_readgate, input) + np.dot(self.w_rec_readgate, self.output) + np.dot(self.w_mem_readgate, self.memory) + self.w_readgate_bias)
+
+        #Compute hidden activation - processing hidden output for this iteration of net run
+        hidden_act = np.multiply(read_gate_out, self.memory) + input_out
+
+        #Write gate (memory cell)
+        write_gate_out = expit(np.dot(self.w_writegate, input)+ np.dot(self.w_rec_writegate, self.output) + np.dot(self.w_mem_writegate, self.memory) + self.w_writegate_bias)
+
+        #Write to memory Cell - Update memory
+        self.memory += np.multiply(write_gate_out, np.tanh(hidden_act))
+
+        #Compute final output
+        self.output = np.dot(self.w_hid_out, hidden_act)
+        if self.output_activation == 'tanh': self.output = np.tanh(self.output)
+        if self.output_activation == 'sigmoid': self.output = expit(self.output)
+        return self.output
+
+    def reset(self, batch_size):
+        #Adaptive components (plastic with network running)
+        self.output = np.mat(np.zeros((self.num_output, batch_size)))
+        self.memory = np.mat(np.zeros((self.num_mem, batch_size)))
+
+    def predict(self, input):
+        return np.array(self.forward(input))
+
+    def from_gdnet(self):
+        self.gd_net.reset(batch_size=1)
+        self.reset(batch_size=1)
+
+        gd_params = self.gd_net.state_dict()  # GD-Net params
+        params = self.param_dict  # Self params
+
+        keys = self.gd_net.state_dict().keys()  # Common keys
+        for key in keys:
+            params[key][:] = gd_params[key].cpu().numpy()
+
+    def to_gdnet(self):
+        self.gd_net.reset(batch_size=1)
+        self.reset(batch_size=1)
+
+        gd_params = self.gd_net.state_dict()  # GD-Net params
+        params = self.param_dict  # Self params
+
+        keys = self.gd_net.state_dict().keys()  # Common keys
+        for key in keys:
+            gd_params[key][:] = params[key]
+
+class PT_MMU(nn.Module):
     def __init__(self, input_size, hidden_size, memory_size, output_size, output_activation):
-        super(PT_GRUMB, self).__init__()
+        super(PT_MMU, self).__init__()
 
         self.input_size = input_size; self.hidden_size = hidden_size; self.memory_size = memory_size; self.output_size = output_size
         if output_activation == 'sigmoid': self.output_activation = F.sigmoid
@@ -68,6 +174,8 @@ class PT_GRUMB(nn.Module):
             #torch.nn.init.sparse(param, sparsity=0.5)
             torch.nn.init.kaiming_normal(param)
 
+
+
     def reset(self, batch_size):
         # Adaptive components
         self.mem = Variable(torch.zeros(self.memory_size, batch_size), requires_grad=1).cuda()
@@ -105,22 +213,8 @@ class PT_GRUMB(nn.Module):
             param.requires_grad = False
             param.volatile = True
 
-    def to_fast_net(self):
-        self.reset(1)
-        keys = self.state_dict().keys()  # Get all keys
-        params = self.state_dict()  # Self params
-        fast_net_params = self.fast_net.param_dict  # Fast Net params
-
-        for key in keys:
-            fast_net_params[key][:] = params[key].cpu().numpy()
-
-    def from_fast_net(self):
-        keys = self.state_dict().keys() #Get all keys
-        params = self.state_dict() #Self params
-        fast_net_params = self.fast_net.param_dict #Fast Net params
-
-        for key in keys:
-            params[key][:] = torch.from_numpy(fast_net_params[key])
+    def predict(self, input):
+        return self.fast_net.predict(input)
 
 class SSNE:
     def __init__(self, parameters):
@@ -281,66 +375,12 @@ class SSNE:
 
 
 
-def simulator_test_perfect(model, filename = 'ColdAir.csv', downsample_rate=25):
-    from matplotlib import pyplot as plt
-    plt.switch_backend('Qt4Agg')
-
-    # Import training data and clear away the two top lines
-    data = np.loadtxt(filename, delimiter=',', skiprows=2)
-
-    # Splice data (downsample)
-    ignore = np.copy(data)
-    data = data[0::downsample_rate]
-    for i in range(data.shape[0]):
-        for j in range(data.shape[1]):
-            if (i != data.shape[0] - 1):
-                data[i][j] = ignore[(i * downsample_rate):(i + 1) * downsample_rate,
-                             j].sum() / downsample_rate
-            else:
-                residue = ignore.shape[0] - i * downsample_rate
-                data[i][j] = ignore[(i * downsample_rate):i * downsample_rate + residue, j].sum() / residue
-
-    # Normalize between 0-0.99
-    normalizer = np.zeros(data.shape[1])
-    min = np.zeros(len(data[0]))
-    max = np.zeros(len(data[0]))
-    for i in range(len(data[0])):
-        min[i] = np.amin(data[:, i])
-        max[i] = np.amax(data[:, i])
-        normalizer[i] = max[i] - min[i] + 0.00001
-        data[:, i] = (data[:, i] - min[i]) / normalizer[i]
-
-    print ('TESTING NOW')
-    input = np.reshape(data[0], (1, 21))  # First input to the simulatior
-    track_target = np.reshape(np.zeros((len(data) - 1) * 19), (19, len(data) - 1))
-    track_output = np.reshape(np.zeros((len(data) - 1) * 19), (19, len(data) - 1))
-
-    for example in range(len(data)-1):  # For all training examples
-        model_out = model.predict(input)
-
-        # Track index
-        for index in range(19):
-            track_output[index][example] = model_out[0][index]# * normalizer[index] + min[index]
-            track_target[index][example] = data[example+1][index]# * normalizer[index] + min[index]
-
-        # Fill in new input data
-        for k in range(len(model_out)):
-            input[k] = input = np.reshape(data[example+1], (1, 21))
-        # Fill in two control variables
-        input[0][19] = data[example + 1][19]
-        input[0][20] = data[example + 1][20]
 
 
-    for index in range(19):
-        plt.plot(track_target[index], 'r--',label='Actual Data: ' + str(index))
-        plt.plot(track_output[index], 'b-',label='TF_Simulator: ' + str(index))
-        #np.savetxt('R_Simulator/output_' + str(index) + '.csv', track_output[index])
-        #np.savetxt('R_Simulator/target_' + str(index) + '.csv', track_target[index])
-        plt.legend( loc='upper right',prop={'size':6})
-        #plt.savefig('Graphs/' + 'Index' + str(index) + '.png')
-        #print track_output[index]
-        plt.show()
 
+
+
+#Simulator stuff
 def simulator_results(model, filename = 'ColdAir.csv', downsample_rate=25):
 
 
@@ -391,9 +431,7 @@ def simulator_results(model, filename = 'ColdAir.csv', downsample_rate=25):
 
 
     for index in range(19):
-        x = [1,2,3]; y = [0,0,0]
-        plt.plot(x, y)
-        plt.show()
+
         plt.plot(track_target[index], 'r--',label='Actual Data: ' + str(index))
         plt.plot(track_output[index], 'b-',label='TF_Simulator: ' + str(index))
         #np.savetxt('R_Simulator/output_' + str(index) + '.csv', track_output[index])
@@ -403,260 +441,13 @@ def simulator_results(model, filename = 'ColdAir.csv', downsample_rate=25):
         #print track_output[index]
         plt.show()
 
-def controller_results(individual, setpoints, start_controller_input, start_sim_input, simulator):  # Controller fitness
-    from matplotlib import pyplot as plt
-    plt.switch_backend('Qt4Agg')
-
-    control_input = np.copy(start_controller_input)  # Input to the controller
-    sim_input = np.copy(start_sim_input)  # Input to the simulator
-    track_output = np.reshape(np.zeros(len(setpoints) - 1), (len(setpoints) - 1, 1))
-
-    for example in range(len(setpoints) - 1):  # For all training examples
-        # Fill in the setpoint to control input
-        control_input[0][-1] = setpoints[example][0]
-
-        # # Add noise to the state input to the controller
-        # if self.parameters.sensor_noise != 0:  # Add sensor noise
-        #     for i in range(19):
-        #         std = self.parameters.sensor_noise * abs(noise_input[0][i]) / 100.0
-        #         if std != 0:
-        #             noise_input[0][i] += np.random.normal(0, std / 2.0)
-        #
-        # if self.parameters.sensor_failure != None:  # Failed sensor outputs 0 regardless
-        #     for i in self.parameters.sensor_failure:
-        #         noise_input[0][i] = 0
-        #
-
-        # RUN THE CONTROLLER TO GET CONTROL OUTPUT
-        control_out = individual.predict(control_input)
-        #
-        # # Add actuator noise (controls)
-        # if self.parameters.actuator_noise != 0:
-        #     for i in range(len(control_out[0])):
-        #         std = self.parameters.actuator_noise * abs(control_out[0][i]) / 100.0
-        #         if std != 0:
-        #             control_out[0][i] += np.random.normal(0, std / 2.0)
-        #
-        # if self.parameters.actuator_failure != None:  # Failed actuator outputs 0 regardless
-        #     for i in self.parameters.actuator_failure:
-        #         control_out[0][i] = 0
-
-
-        # Fill in the controls
-        sim_input[0][19] = control_out[0][0]
-        sim_input[0][20] = control_out[0][1]
-
-        # Use the simulator to get the next state
-        simulator_out = simulator.predict(sim_input)
-
-        # Calculate error (weakness)
-        track_output[example][0] = simulator_out[0][11]
-        #weakness += math.fabs(simulator_out[0][self.parameters.target_sensor] - setpoints[example][0])  # Time variant simulation
-
-        # Fill in the simulator inputs and control inputs
-        for i in range(simulator_out.shape[-1]):
-            sim_input[0][i] = simulator_out[0][i]
-            control_input[0][i] = simulator_out[0][i]
-
-        #decorator = np.reshape(np.arange(len(setpoints) - 1) + 1, (len(setpoints) - 1, 1))
-        #setpoints = np.array(setpoints[0:-1])
-        #setpoints = np.concatenate((decorator, setpoints))
-        #track_output = np.concatenate((decorator, track_output))
-
-    plt.plot(setpoints, 'r--', label='Desired Turbine Speed' )
-    plt.plot(track_output, 'b-', label='Achieved Turbine Speed')
-    # np.savetxt('R_Simulator/output_' + str(index) + '.csv', track_output[index])
-    # np.savetxt('R_Simulator/target_' + str(index) + '.csv', track_target[index])
-    plt.legend(loc='upper right', prop={'size': 15})
-    plt.xlabel("Time", fontsize = 15)
-    plt.ylabel("ST-502 (Turbine Speed)", fontsize=15)
-    axes = plt.gca()
-    axes.set_ylim([0, 1.1])
-    # plt.savefig('Graphs/' + 'Index' + str(index) + '.png')
-    # print track_output[index]
-    plt.show()
-
-def pt_controller_results(individual, setpoints, start_controller_input, start_sim_input,
-                           simulator, sensor_noise, actuator_noise, sensor_failure):  # Controller fitness
-    from matplotlib import pyplot as plt
-    plt.switch_backend('Qt4Agg')
-
-    control_input = np.copy(start_controller_input)  # Input to the controller
-    sim_input = np.copy(start_sim_input)  # Input to the simulator
-    track_output = np.reshape(np.zeros(len(setpoints) - 1), (len(setpoints) - 1, 1))
-    individual.fast_net.reset()
-
-    for example in range(len(setpoints) - 1):  # For all training examples
-        # Fill in the setpoint to control input
-        control_input[0][-1] = setpoints[example][0]
-
-        # Add noise to the state input to the controller
-        if sensor_noise != 0:  # Add sensor noise
-            for i in range(19):
-                std = sensor_noise * abs(control_input[0][i])
-                if std != 0:
-                    control_input[0][i] += np.random.normal(0, std)
-
-        if sensor_failure != None:  # Failed sensor outputs 0 regardless
-            if random.random() < sensor_failure:
-                control_input[0][11] = 0.0
-
-        # RUN THE CONTROLLER TO GET CONTROL OUTPUT
-        control_out = individual.fast_net.predict(control_input)
-        #
-        # Add actuator noise (controls)
-        if actuator_noise != 0:
-            for i in range(len(control_out[0])):
-                std = actuator_noise * abs(control_out[0][i])
-                if std != 0:
-                    control_out[0][i] += np.random.normal(0, std)
-
-
-
-        # Fill in the controls
-        sim_input[0][19] = control_out[0][0]
-        sim_input[0][20] = control_out[0][1]
-
-        # Use the simulator to get the next state
-        simulator_out = simulator.predict(sim_input)
-
-        # Calculate error (weakness)
-        track_output[example][0] = simulator_out[0][11]
-        # weakness += math.fabs(simulator_out[0][self.parameters.target_sensor] - setpoints[example][0])  # Time variant simulation
-
-        # Fill in the simulator inputs and control inputs
-        for i in range(simulator_out.shape[-1]):
-            sim_input[0][i] = simulator_out[0][i]
-            control_input[0][i] = simulator_out[0][i]
-
-            # decorator = np.reshape(np.arange(len(setpoints) - 1) + 1, (len(setpoints) - 1, 1))
-            # setpoints = np.array(setpoints[0:-1])
-            # setpoints = np.concatenate((decorator, setpoints))
-            # track_output = np.concatenate((decorator, track_output))
-
-    plt.plot(setpoints, 'r--', label='Desired Turbine Speed')
-    plt.plot(track_output, 'b-', label='Achieved Turbine Speed')
-    # np.savetxt('R_Simulator/output_' + str(index) + '.csv', track_output[index])
-    # np.savetxt('R_Simulator/target_' + str(index) + '.csv', track_target[index])
-    plt.legend(loc='upper right', prop={'size': 15})
-    plt.xlabel("Time", fontsize=15)
-    plt.ylabel("ST-502 (Turbine Speed)", fontsize=15)
-    axes = plt.gca()
-    axes.set_ylim([0, 1.1])
-    # plt.savefig('Graphs/' + 'Index' + str(index) + '.png')
-    # print track_output[index]
-    plt.show()
-
-def controller_results_bprop(individual, setpoints, start_controller_input, start_sim_input, simulator, train_x):  # Controller fitness
-    from matplotlib import pyplot as plt
-    plt.switch_backend('Qt4Agg')
-
-    #Normalizer #TODO DONT DO THIS
-    if True:
-        # Import training data and clear away the two top lines
-        downsample_rate = 25
-        data = np.loadtxt('ColdAir.csv', delimiter=',', skiprows=2)
-
-        # Splice data (downsample)
-        ignore = np.copy(data)
-        data = data[0::downsample_rate]
-        for i in range(data.shape[0]):
-            for j in range(data.shape[1]):
-                if (i != data.shape[0] - 1):
-                    data[i][j] = ignore[(i * downsample_rate):(i + 1) * downsample_rate,
-                                 j].sum() / downsample_rate
-                else:
-                    residue = ignore.shape[0] - i * downsample_rate
-                    data[i][j] = ignore[(i * downsample_rate):i * downsample_rate + residue, j].sum() / residue
-
-        # Normalize between 0-0.99
-        normalizer = np.zeros(data.shape[1])
-        min = np.zeros(len(data[0]))
-        max = np.zeros(len(data[0]))
-        for i in range(len(data[0])):
-            min[i] = np.amin(data[:, i])
-            max[i] = np.amax(data[:, i])
-            normalizer[i] = max[i] - min[i] + 0.00001
-            data[:, i] = (data[:, i] - min[i]) / normalizer[i]
-
-        control_input = np.copy(start_controller_input)  # Input to the controller
-        sim_input = np.copy(start_sim_input)  # Input to the simulator
-        track_output = np.reshape(np.zeros(len(setpoints) - 1), (len(setpoints) - 1, 1))
-
-    for example in range(len(setpoints) - 1):  # For all training examples
-        # Fill in the setpoint to control input
-        control_input[0][-1] = setpoints[example][0]
-
-        # # Add noise to the state input to the controller
-        # if self.parameters.sensor_noise != 0:  # Add sensor noise
-        #     for i in range(19):
-        #         std = self.parameters.sensor_noise * abs(noise_input[0][i]) / 100.0
-        #         if std != 0:
-        #             noise_input[0][i] += np.random.normal(0, std / 2.0)
-        #
-        # if self.parameters.sensor_failure != None:  # Failed sensor outputs 0 regardless
-        #     for i in self.parameters.sensor_failure:
-        #         noise_input[0][i] = 0
-        #
-
-        # RUN THE CONTROLLER TO GET CONTROL OUTPUT
-        control_out = individual.predict(control_input)
-
-        #
-        # # Add actuator noise (controls)
-        # if self.parameters.actuator_noise != 0:
-        #     for i in range(len(control_out[0])):
-        #         std = self.parameters.actuator_noise * abs(control_out[0][i]) / 100.0
-        #         if std != 0:
-        #             control_out[0][i] += np.random.normal(0, std / 2.0)
-        #
-        # if self.parameters.actuator_failure != None:  # Failed actuator outputs 0 regardless
-        #     for i in self.parameters.actuator_failure:
-        #         control_out[0][i] = 0
-
-
-        # Fill in the controls
-        sim_input[0][19] = control_out[0][0]
-        sim_input[0][20] = control_out[0][1]
-
-        # Use the simulator to get the next state
-        simulator_out = simulator.predict(sim_input)
-
-        # Calculate error (weakness)
-        track_output[example][0] = simulator_out[0][11] * normalizer[11] + min[11]
-        setpoints[example][0] = setpoints[example][0] * normalizer[11] + min[11]
-        #weakness += math.fabs(simulator_out[0][self.parameters.target_sensor] - setpoints[example][0])  # Time variant simulation
-
-        # Fill in the simulator inputs and control inputs
-        for i in range(simulator_out.shape[-1]):
-            sim_input[0][i] = train_x[example+1][i]
-            control_input[0][i] = train_x[example+1][i]
-
-            #sim_input[0][i] = simulator_out[0][i]
-            #control_input[0][i] = simulator_out[0][i]
-
-
-
-        #decorator = np.reshape(np.arange(len(setpoints) - 1) + 1, (len(setpoints) - 1, 1))
-        #setpoints = np.array(setpoints[0:-1])
-        #setpoints = np.concatenate((decorator, setpoints))
-        #track_output = np.concatenate((decorator, track_output))
-
-    plt.plot(setpoints[0:-10,0:], 'r--', label='Target Turbine Speed' )
-    plt.plot(track_output[0:-10,0:], 'b-', label='Controller Turbine Speed ')
-    # np.savetxt('R_Simulator/output_' + str(index) + '.csv', track_output[index])
-    # np.savetxt('R_Simulator/target_' + str(index) + '.csv', track_target[index])
-    plt.legend(loc='lower right', prop={'size': 15})
-    plt.xlabel("Time (min)", fontsize = 15)
-    plt.ylabel("ST-502 (Turbine Speed)", fontsize=15)
-    # plt.savefig('Graphs/' + 'Index' + str(index) + '.png')
-    # print track_output[index]
-    plt.show()
 
 
 
 
-
+def unsqueeze(array, axis=1):
+    if axis == 0: return np.reshape(array, (1, len(array)))
+    elif axis == 1: return np.reshape(array, (len(array), 1))
 
 def unpickle(filename):
     import pickle
@@ -669,15 +460,6 @@ def pickle_object(obj, filename):
         cPickle.dump(obj, output, -1)
 
 
-
-
-import fastrand
-import math
-import  cPickle
-import random
-import numpy as np
-from scipy.special import expit
-#from scipy.sparse import random as scipy_rand
 
 
 
