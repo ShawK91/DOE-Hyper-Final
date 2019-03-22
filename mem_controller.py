@@ -42,20 +42,21 @@ class Tracker(): #Tracker
         self.tr_avg_fit.append(np.array([generation, self.avg_fitness]))
         np.savetxt(filename, np.array(self.tr_avg_fit), fmt='%.3f', delimiter=',')
 
+
 class Parameters:
     def __init__(self):
             self.pop_size = 100
             self.load_seed = False #Loads a seed population from the save_foldername
                                   # IF FALSE: Runs Backpropagation, saves it and uses that
             # Determine the nerual archiecture
-            self. output_activation = None
+            self.output_activation = None
 
             #Controller choices
             self.target_sensor = 11 #Turbine speed the sensor to control
             self.run_time = 300 #Controller Run time
 
             #Controller noise
-            self.sensor_noise = 0.0
+            self.sensor_noise = 0.1
             self.sensor_failure = 0.0
             self.actuator_noise = 0.0
 
@@ -115,12 +116,12 @@ class Task_Controller: #Reconfigurable Control Task
         #####Create Reconfigurable controller population
         self.pop = []
         for i in range(self.parameters.pop_size):
-            # Choose architecture
+            # Choose architecture  #TODO: Use LSTM here instead
             self.pop.append(mod.MMU(self.num_input, self.num_hidden, parameters.num_mem, self.num_output,
                                              output_activation=self.parameters.output_activation))
 
         ###Initialize Controller Population
-        if self.parameters.load_seed: self.pop[0] = mod.unpickle('R_Controller/seed_controller') #Load PT_GRUMB object
+        if self.parameters.load_seed: self.pop[0] = mod.unpickle('R_Reconfigurable_Controller/champ_controller_backup1_nonoise') #Load PT_GRUMB object#mod.unpickle('R_Controller/seed_controller') #Load PT_GRUMB object
         else: #Run Backprop
             self.run_bprop(self.pop[0].gd_net)
             self.pop[0].from_gdnet()
@@ -154,10 +155,10 @@ class Task_Controller: #Reconfigurable Control Task
 
         #Set up training
         seq_len = 1
-        all_train_x = torch.Tensor(all_train_x).cuda(); all_train_y = torch.Tensor(all_train_y).cuda()
+        all_train_x = torch.Tensor(all_train_x);all_train_y = torch.Tensor(all_train_y)
         train_dataset = util.TensorDataset(all_train_x, all_train_y)
         train_loader = util.DataLoader(train_dataset, batch_size=self.parameters.batch_size, shuffle=True)
-        model.cuda()
+        model
 
         for epoch in range(1, self.parameters.total_epochs + 1):
 
@@ -173,14 +174,14 @@ class Task_Controller: #Reconfigurable Control Task
                     net_out = model.forward(net_inp)
                     target_T = Variable(targets)
                     loss = criterion(net_out, target_T)
-                    loss.backward(retain_variables=True)
-                    epoch_loss += loss.cpu().data.numpy()[0]
+                    loss.backward(retain_graph=True)
+                    epoch_loss += loss.data.numpy()#[0]
 
 
                 optimizer.step()  # Perform the gradient updates to weights for the entire set of collected gradients
                 optimizer.zero_grad()
 
-            print 'Epoch: ', epoch, ' Loss: ', epoch_loss
+            print('Epoch: ', epoch, ' Loss: ', epoch_loss)
 
     def plot_controller(self, individual):
         setpoints = self.get_setpoint()
@@ -397,8 +398,6 @@ class Task_Controller: #Reconfigurable Control Task
         return train_data, valid_data
 
 
-
-
 if __name__ == "__main__":
     parameters = Parameters()  # Create the Parameters class
     tracker = Tracker(parameters)  # Initiate tracker
@@ -406,20 +405,6 @@ if __name__ == "__main__":
     control_task = Task_Controller(parameters)
     for gen in range(1, parameters.total_gens):
         gen_best_fitness, valid_score = control_task.evolve(gen)
-        print 'Generation:', gen, ' Epoch_reward:', "%0.2f" % gen_best_fitness, ' Valid Score:', "%0.2f" % valid_score, '  Cumul_Valid_Score:', "%0.2f" % tracker.hof_avg_fitness
+        print('Generation:', gen, ' Epoch_reward:', "%0.2f" % gen_best_fitness, ' Valid Score:', "%0.2f" % valid_score, '  Cumul_Valid_Score:', "%0.2f" % tracker.hof_avg_fitness)
         tracker.add_fitness(gen_best_fitness, gen)  # Add average global performance to tracker
         tracker.add_hof_fitness(valid_score, gen)  # Add best global performance to tracker
-
-
-
-
-
-
-
-
-
-
-
-
-
-

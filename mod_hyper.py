@@ -6,8 +6,9 @@ import torch.nn.functional as F
 import numpy as np, sys
 import matplotlib.pyplot as plt
 from scipy.special import expit
-import random, fastrand, math, cPickle
-
+import random, fastrand, math
+import _pickle as cPickle
+import pickle as pkl
 
 
 
@@ -137,49 +138,49 @@ class PT_MMU(nn.Module):
 
 
         #Input gate
-        self.w_inpgate = Parameter(torch.rand(memory_size, input_size), requires_grad=1)
-        self.w_rec_inpgate = Parameter(torch.rand( memory_size, output_size), requires_grad=1)
-        self.w_mem_inpgate = Parameter(torch.rand(memory_size, memory_size), requires_grad=1)
+        self.w_inpgate = Parameter(torch.rand(memory_size, input_size), requires_grad=True)
+        self.w_rec_inpgate = Parameter(torch.rand( memory_size, output_size), requires_grad=True)
+        self.w_mem_inpgate = Parameter(torch.rand(memory_size, memory_size), requires_grad=True)
 
         #Block Input
-        self.w_inp = Parameter(torch.rand(memory_size, input_size), requires_grad=1)
-        self.w_rec_inp = Parameter(torch.rand(memory_size, output_size), requires_grad=1)
+        self.w_inp = Parameter(torch.rand(memory_size, input_size), requires_grad=True)
+        self.w_rec_inp = Parameter(torch.rand(memory_size, output_size), requires_grad=True)
 
         #Read Gate
-        self.w_readgate = Parameter(torch.rand(memory_size, input_size), requires_grad=1)
-        self.w_rec_readgate = Parameter(torch.rand(memory_size, output_size), requires_grad=1)
-        self.w_mem_readgate = Parameter(torch.rand(memory_size, memory_size), requires_grad=1)
+        self.w_readgate = Parameter(torch.rand(memory_size, input_size), requires_grad=True)
+        self.w_rec_readgate = Parameter(torch.rand(memory_size, output_size), requires_grad=True)
+        self.w_mem_readgate = Parameter(torch.rand(memory_size, memory_size), requires_grad=True)
 
         #Write Gate
-        self.w_writegate = Parameter(torch.rand(memory_size, input_size), requires_grad=1)
-        self.w_rec_writegate = Parameter(torch.rand(memory_size, output_size), requires_grad=1)
-        self.w_mem_writegate = Parameter(torch.rand(memory_size, memory_size), requires_grad=1)
+        self.w_writegate = Parameter(torch.rand(memory_size, input_size), requires_grad=True)
+        self.w_rec_writegate = Parameter(torch.rand(memory_size, output_size), requires_grad=True)
+        self.w_mem_writegate = Parameter(torch.rand(memory_size, memory_size), requires_grad=True)
 
         #Output weights
-        self.w_hid_out = Parameter(torch.rand(output_size, memory_size), requires_grad=1)
+        self.w_hid_out = Parameter(torch.rand(output_size, memory_size), requires_grad=True)
 
         #Biases
-        self.w_input_gate_bias = Parameter(torch.zeros(memory_size, 1), requires_grad=1)
-        self.w_block_input_bias = Parameter(torch.zeros(memory_size, 1), requires_grad=1)
-        self.w_readgate_bias = Parameter(torch.zeros(memory_size, 1), requires_grad=1)
-        self.w_writegate_bias = Parameter(torch.zeros(memory_size, 1), requires_grad=1)
+        self.w_input_gate_bias = Parameter(torch.zeros(memory_size, 1), requires_grad=True)
+        self.w_block_input_bias = Parameter(torch.zeros(memory_size, 1), requires_grad=True)
+        self.w_readgate_bias = Parameter(torch.zeros(memory_size, 1), requires_grad=True)
+        self.w_writegate_bias = Parameter(torch.zeros(memory_size, 1), requires_grad=True)
 
         # Adaptive components
-        self.mem = Variable(torch.zeros(self.memory_size, 1), requires_grad=1).cuda()
-        self.out = Variable(torch.zeros(self.output_size, 1), requires_grad=1).cuda()
+        self.mem = Variable(torch.zeros(self.memory_size, 1), requires_grad=True)##.cuda()
+        self.out = Variable(torch.zeros(self.output_size, 1), requires_grad=True)#.cuda()
 
         for param in self.parameters():
             #torch.nn.init.xavier_normal(param)
             #torch.nn.init.orthogonal(param)
             #torch.nn.init.sparse(param, sparsity=0.5)
-            torch.nn.init.kaiming_normal(param)
+            torch.nn.init.kaiming_normal_(param)
 
 
 
     def reset(self, batch_size):
         # Adaptive components
-        self.mem = Variable(torch.zeros(self.memory_size, batch_size), requires_grad=1).cuda()
-        self.out = Variable(torch.zeros(self.output_size, batch_size), requires_grad=1).cuda()
+        self.mem = Variable(torch.zeros(self.memory_size, batch_size), requires_grad=True)#.cuda()
+        self.out = Variable(torch.zeros(self.output_size, batch_size), requires_grad=True)#.cuda()
 
     def graph_compute(self, input, rec_output, mem):
         block_inp = F.sigmoid(self.w_inp.mm(input) + self.w_rec_inp.mm(rec_output))# + self.w_block_input_bias)
@@ -256,7 +257,7 @@ class SSNE:
         W1 = gene_1.param_dict
         W2 = gene_2.param_dict
         num_variables = len(W1)
-        if num_variables != len(W2): print 'Warning: Genes for crossover might be incompatible'
+        if num_variables != len(W2): print('Warning: Genes for crossover might be incompatible')
 
         # Crossover opertation [Indexed by column, not rows]
         num_cross_overs = fastrand.pcg32bounded(num_variables * 2)  # Lower bounded on full swaps
@@ -332,9 +333,7 @@ class SSNE:
 
         #Extinction step (Resets all the offsprings genes; preserves the elitists)
         if random.random() < self.parameters.extinction_prob: #An extinction event
-            print
-            print "######################Extinction Event Triggered#######################"
-            print
+            print("\n######################Extinction Event Triggered#######################\n")
             for i in offsprings:
                 if random.random() < self.parameters.extinction_magnituide and not (i in elitist_index):  # Extinction probabilities
                     self.reset_genome(pop[i])
@@ -450,21 +449,19 @@ def unsqueeze(array, axis=1):
     elif axis == 1: return np.reshape(array, (len(array), 1))
 
 def unpickle(filename):
-    import pickle
-    with open(filename, 'rb') as handle:
-        b = pickle.load(handle)
-    return b
+    # import pickle
+    # with open(filename, 'rb') as handle:
+    #     b = pickle.load(handle)
+    # return b
+
+    with open(filename, 'rb') as f:
+        u = pkl._Unpickler(f)
+        u.encoding = 'latin1'
+        p = u.load()
+        return p
 
 def pickle_object(obj, filename):
     with open(filename, 'wb') as output:
         cPickle.dump(obj, output, -1)
-
-
-
-
-
-
-
-
 
 
